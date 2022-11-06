@@ -1,0 +1,80 @@
+---
+- hosts: all
+  become: true
+
+  handlers:
+    - name: os-reboot
+      become: true
+      reboot:
+
+  tasks:
+
+  - import_tasks: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ansible/roles/raspberry-pi-dramble/raspberry-pi-dramble/tasks/cgroup-features.yml"
+    vars:
+      deploy_target: pi
+
+
+  - name: install iptables
+    apt: name={{item}} state=present
+    with_items:
+        - iptables
+        - curl
+
+  - name: flush current iptables
+    become: true
+    retries: 3
+    delay: 1
+    command:
+      cmd: iptables -F
+    changed_when: false
+
+
+  - name: set iptables alternative
+    become: true
+    community.general.alternatives:
+      name: iptables
+      path: /usr/sbin/iptables-legacy
+    notify: [os-reboot]
+
+
+  - name: set ip6tables alternative
+    become: true
+    community.general.alternatives:
+      name: ip6tables
+      path: /usr/sbin/ip6tables-legacy
+    notify: [os-reboot]
+
+
+  - name: check if k3s is already installed
+    stat:
+      path: /usr/local/bin/k3s
+    register: k3s_already_installed
+
+
+
+  - name: install k3s
+    shell: >
+        cd /tmp &&
+        export INSTALL_K3S_VERSION=v1.24.4+k3s1 &&
+        export K3S_KUBECONFIG_MODE="644" &&
+        export INSTALL_K3S_EXEC=" --disable servicelb --disable traefik" &&
+        curl -sfL https://get.k3s.io | sh -s -
+    become: true
+    when:
+      - k3s_already_installed.stat.exists == False
+
+  - name: get private ip
+    shell: >
+      hostname -I | cut -d " " -f1
+    register: private_ip
+
+
+  # this will add a private registry exception for port 30005
+  # so you can run your own internal docker registry and push/pull images from there
+  - name: set up private regsitries
+    ansible.builtin.template:
+      src: files/registries.j2
+      dest: /etc/rancher/k3s/registries.yaml
+    vars:
+      registry_ip_and_port_in_template: "{{ private_ip.stdout }}:30005"
+    notify: [os-reboot]
